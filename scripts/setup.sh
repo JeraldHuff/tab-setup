@@ -64,6 +64,12 @@ for sid, entry in tracking.items():
 # Claim the earliest sequence slot not already in use
 chosen = next((c for c in SEQUENCE if c not in used_colors), SEQUENCE[0])
 
+# Avoid name collision: if another live session already uses this name,
+# append the color so each tab stays visually distinct.
+existing_names = {entry.get("name", "") for entry in live.values()}
+if name in existing_names:
+    name = f"{name} ({chosen})"
+
 live[session_id] = {"color": chosen, "pid": claude_pid, "cwd": cwd, "name": name}
 with open(tracking_file, "w") as f:
     json.dump(live, f, indent=2)
