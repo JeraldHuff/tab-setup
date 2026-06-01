@@ -47,6 +47,25 @@ Or sync all open sessions at once:
 | `/tab-setup billing` | Color this tab, name it "billing" |
 | `/tab-setup all` | Recolor + rename every active Claude session |
 
+## Auto-startup (optional)
+
+`hook-startup.sh` runs automatically at session boot via Claude Code's `SessionStart` hook — no need to type `/tab-setup` each time.
+
+Add to `~/.claude/settings.json`:
+
+```json
+"hooks": {
+  "SessionStart": [{
+    "matcher": "",
+    "hooks": [{"type": "command", "command": "bash ~/.claude/skills/tab-setup/scripts/hook-startup.sh"}]
+  }]
+}
+```
+
+**How it works:** `CLAUDE_SESSION_ID` is empty in `SessionStart` hooks (a known Claude Code limitation), so the script discovers the session by matching `/dev/tty` against live session files instead. It then assigns a color, writes iTerm2 escape codes immediately, and injects `/color` + `/rename` via a background AppleScript after a short delay (default 4s — increase via `TAB_SETUP_INJECT_DELAY` if needed).
+
+**Name collision avoidance:** if two sessions share the same project name, the second gets `project (color)` — matching its banner color — so tabs stay visually distinct.
+
 ## Requirements
 
 - macOS with iTerm2
