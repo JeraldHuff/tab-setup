@@ -1,14 +1,22 @@
 # tab-setup
 
-A Claude Code skill that gives each iTerm2 tab a unique high-contrast color and renames it after its working directory — automatically, across all open sessions.
+A Claude Code skill that gives each terminal tab a unique high-contrast color and renames it after its working directory — automatically, across all open sessions.
 
 ## What it does
 
-- Sets the **iTerm2 tab color** via proprietary escape codes
-- Injects **`/color`** and **`/rename`** into the Claude Code session to update the prompt bar
-- Tracks open sessions in `~/.claude/tab-colors.json` and prunes dead ones automatically
-- Assigns colors from a pre-computed high-contrast sequence so adjacent tabs never look similar
+- Injects **`/color`** and **`/rename`** into the Claude Code session to update the banner
+- Tracks session→color assignments in `~/.claude/tab-colors.json` and prunes dead ones automatically
+- Assigns colors from a pre-computed high-contrast sequence so adjacent sessions never look similar
+- Avoids name collisions: if two sessions share a project name, the second gets `project (color)` appended
 - A background watcher process removes each session from the tracking file when Claude exits
+
+## Supported environments
+
+| Environment | Banner color | Tab background | Auto-inject |
+|---|---|---|---|
+| iTerm2 (macOS) | ✅ `/color` via AppleScript | ✅ iTerm2 escape codes | ✅ ~4s delay |
+| VS Code / code-server | ✅ `/color` via extension | ✅ `workbench.action.terminal.changeColor` | ✅ polls until idle |
+| Other terminals | ✅ reported to user | ❌ | ❌ manual |
 
 ## Color sequence
 
@@ -16,28 +24,22 @@ Colors are assigned in this order (greedy farthest-point in RGB space):
 
 `red → blue → green → pink → purple → cyan → yellow → orange`
 
-With `sync-all`, sessions are sorted oldest-first so the longest-running session always anchors at red. With `tab-setup` (single session), the earliest free slot in the sequence is claimed.
+With `/tab-setup all`, sessions are sorted oldest-first so the longest-running session always anchors at red. With `/tab-setup` (single session), the sequence rotates from the last assigned color so re-invocations always advance.
 
 ## Installation
-
-1. Copy this folder into your Claude Code skills directory:
 
 ```bash
 cp -r tab-setup ~/.claude/skills/tab-setup
 chmod +x ~/.claude/skills/tab-setup/scripts/*.sh
 ```
 
-2. Run at the start of any session:
+**VS Code / code-server only** — install the companion extension once:
 
-```
-/tab-setup
+```bash
+bash ~/.claude/skills/tab-setup/vscode-extension/install.sh
 ```
 
-Or sync all open sessions at once:
-
-```
-/tab-setup all
-```
+Then reload the VS Code window.
 
 ## Usage
 
@@ -47,8 +49,32 @@ Or sync all open sessions at once:
 | `/tab-setup billing` | Color this tab, name it "billing" |
 | `/tab-setup all` | Recolor + rename every active Claude session |
 
+## Auto-startup (optional)
+
+`hook-startup.sh` colors the session automatically at boot — no need to type `/tab-setup`.
+
+Add to `~/.claude/settings.json`:
+
+```json
+"hooks": {
+  "SessionStart": [{
+    "matcher": "",
+    "hooks": [{"type": "command", "command": "bash ~/.claude/skills/tab-setup/scripts/hook-startup.sh"}]
+  }]
+}
+```
+
+The script discovers the session by matching `/dev/tty` against live session files (working around the `CLAUDE_SESSION_ID=''` limitation in `SessionStart` hooks), then dispatches to the correct injection mechanism based on the detected environment.
+
+Tune the delay if `/color` fires before Claude's first prompt is ready:
+
+```bash
+TAB_SETUP_INJECT_DELAY=6 bash hook-startup.sh
+```
+
 ## Requirements
 
-- macOS with iTerm2
 - Claude Code CLI
 - Python 3 (stdlib only — no pip dependencies)
+- **iTerm2** (macOS) — for tab background color and auto-injection
+- **VS Code extension** (code-server / VS Code) — for auto-injection; see installation above

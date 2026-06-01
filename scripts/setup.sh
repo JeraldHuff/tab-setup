@@ -1,6 +1,13 @@
 #!/bin/bash
-# Sets tab color and Claude Code banner for a single session.
+# Sets the Claude Code banner color and tab name for a single session.
+# Detects the terminal environment and uses the appropriate injection method.
+#
 # Usage: setup.sh <session_id> [override_name]
+#
+# Environments supported:
+#   iTerm2 (macOS):      iTerm2 escape codes + AppleScript injection
+#   VS Code/code-server: pending-color file for the extension to consume
+#   Other:               color assigned and reported; apply /color + /rename manually
 
 SESSION_ID="${1:-unknown}"
 TRACKING_FILE="${HOME}/.claude/tab-colors.json"
@@ -13,8 +20,6 @@ TAB_NAME="${2:-$(basename "$PWD")}"
 RESULT=$(python3 - "$TRACKING_FILE" "$SESSION_ID" "$SESSIONS_DIR" "$PWD" "$TAB_NAME" <<'PYEOF'
 import json, sys, os, glob
 
-# Pre-computed greedy farthest-point sequence — each step maximises RGB
-# distance from all prior picks, so adjacent sessions never look similar.
 SEQUENCE = ["red", "blue", "green", "pink", "purple", "cyan", "yellow", "orange"]
 COLORS = {
     "red":    (220, 50,  47),
@@ -29,7 +34,7 @@ COLORS = {
 
 tracking_file, session_id, sessions_dir, cwd, name = sys.argv[1:]
 
-# Look up the long-lived Claude process PID (not the bash subprocess PID)
+# Resolve the Claude process PID from session files
 claude_pid = None
 for f in glob.glob(os.path.join(sessions_dir, "*.json")):
     try:
@@ -49,11 +54,11 @@ try:
 except Exception:
     tracking = {}
 
-tracking.pop(session_id, None)
-
-# Prune dead PIDs
+# Prune dead sessions; skip _last cursor and malformed entries
 live, used_colors = {}, set()
 for sid, entry in tracking.items():
+    if sid == session_id or sid == "_last" or not isinstance(entry, dict):
+        continue
     try:
         os.kill(entry.get("pid", 0), 0)
         live[sid] = entry
@@ -61,12 +66,37 @@ for sid, entry in tracking.items():
     except (OSError, ProcessLookupError):
         pass
 
-# Claim the earliest sequence slot not already in use
-chosen = next((c for c in SEQUENCE if c not in used_colors), SEQUENCE[0])
+# Rotate from last used color so re-invocations within the same session
+# advance through the sequence rather than landing on the same slot each time
+last_color = tracking.get(session_id, {}).get("color") or tracking.get("_last", "")
+try:
+    start = (SEQUENCE.index(last_color) + 1) % len(SEQUENCE)
+except ValueError:
+    start = 0
+chosen = next(
+    (SEQUENCE[(start + i) % len(SEQUENCE)] for i in range(len(SEQUENCE))
+     if SEQUENCE[(start + i) % len(SEQUENCE)] not in used_colors),
+    SEQUENCE[start]
+)
+
+# Avoid name collision: suffix color only when another live session already holds this name
+existing_names = {e.get("name", "") for e in live.values()}
+if name in existing_names:
+    name = f"{name} ({chosen})"
 
 live[session_id] = {"color": chosen, "pid": claude_pid, "cwd": cwd, "name": name}
+live["_last"] = chosen
 with open(tracking_file, "w") as f:
     json.dump(live, f, indent=2)
+
+# Transcript writes — belt-and-suspenders for clients that read the JSONL directly
+project_hash = cwd.replace("/", "-")
+transcript = os.path.expanduser(f"~/.claude/projects/{project_hash}/{session_id}.jsonl")
+if os.path.exists(transcript):
+    with open(transcript, "a") as f:
+        f.write(json.dumps({"type": "agent-color",  "agentColor":  chosen, "sessionId": session_id}) + "\n")
+        f.write(json.dumps({"type": "custom-title", "customTitle": name,   "sessionId": session_id}) + "\n")
+        f.write(json.dumps({"type": "agent-name",   "agentName":   name,   "sessionId": session_id}) + "\n")
 
 r, g, b = COLORS[chosen]
 print(f"CHOSEN_COLOR={chosen}")
@@ -79,23 +109,22 @@ PYEOF
 )
 
 if [[ -z "$RESULT" ]] || echo "$RESULT" | grep -q '^error'; then
-  echo "error: setup failed — $RESULT"
-  exit 1
+    echo "error: setup failed — $RESULT"
+    exit 1
 fi
 
 eval "$RESULT"
 
-CLAUDE_TTY=$(ps -o tty= -p "$CLAUDE_PID" 2>/dev/null | tr -d ' ')
-if [[ -n "$CLAUDE_TTY" && "$CLAUDE_TTY" != "??" && -w "/dev/$CLAUDE_TTY" ]]; then
-  # Set iTerm2 tab color via proprietary escape codes
-  {
-    printf '\033]6;1;bg;red;brightness;%d\a'   "$TAB_R"
-    printf '\033]6;1;bg;green;brightness;%d\a' "$TAB_G"
-    printf '\033]6;1;bg;blue;brightness;%d\a'  "$TAB_B"
-  } > "/dev/$CLAUDE_TTY"
+if [[ "$TERM_PROGRAM" == "iTerm.app" ]]; then
+    CLAUDE_TTY=$(ps -o tty= -p "$CLAUDE_PID" 2>/dev/null | tr -d ' ')
+    if [[ -n "$CLAUDE_TTY" && "$CLAUDE_TTY" != "??" && -w "/dev/$CLAUDE_TTY" ]]; then
+        {
+            printf '\033]6;1;bg;red;brightness;%d\a'   "$TAB_R"
+            printf '\033]6;1;bg;green;brightness;%d\a' "$TAB_G"
+            printf '\033]6;1;bg;blue;brightness;%d\a'  "$TAB_B"
+        } > "/dev/$CLAUDE_TTY"
 
-  # Inject /color and /rename after Claude finishes responding (~4s delay)
-  osascript - "/dev/$CLAUDE_TTY" "$TAB_NAME" "$CHOSEN_COLOR" <<'ASEOF' &
+        osascript - "/dev/$CLAUDE_TTY" "$TAB_NAME" "$CHOSEN_COLOR" <<'ASEOF' &
 on run argv
   set ttyDevice to item 1 of argv
   set tabName to item 2 of argv
@@ -119,8 +148,14 @@ on run argv
   end try
 end run
 ASEOF
+    else
+        echo "warn: no writable TTY for PID $CLAUDE_PID (tty=$CLAUDE_TTY)" >&2
+    fi
+elif [[ -n "$VSCODE_IPC_HOOK_CLI" ]]; then
+    printf 'session_id=%s\ncolor=%s\nname=%s\n' "$SESSION_ID" "$CHOSEN_COLOR" "$TAB_NAME" \
+        > "${HOME}/.claude/.pending-color"
 else
-  echo "warn: no writable TTY for PID $CLAUDE_PID (tty=$CLAUDE_TTY)" >&2
+    echo "note: not in iTerm2 or VS Code — run /color $CHOSEN_COLOR and /rename $TAB_NAME" >&2
 fi
 
 nohup bash "$(dirname "$0")/watcher.sh" "$CLAUDE_PID" "$SESSION_ID" > /dev/null 2>&1 &
