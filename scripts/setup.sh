@@ -86,16 +86,17 @@ fi
 eval "$RESULT"
 
 CLAUDE_TTY=$(ps -o tty= -p "$CLAUDE_PID" 2>/dev/null | tr -d ' ')
-if [[ -n "$CLAUDE_TTY" && "$CLAUDE_TTY" != "??" && -w "/dev/$CLAUDE_TTY" ]]; then
-  # Set iTerm2 tab color via proprietary escape codes
-  {
-    printf '\033]6;1;bg;red;brightness;%d\a'   "$TAB_R"
-    printf '\033]6;1;bg;green;brightness;%d\a' "$TAB_G"
-    printf '\033]6;1;bg;blue;brightness;%d\a'  "$TAB_B"
-  } > "/dev/$CLAUDE_TTY"
+if [[ "$TERM_PROGRAM" == "iTerm.app" ]]; then
+  if [[ -n "$CLAUDE_TTY" && "$CLAUDE_TTY" != "??" && -w "/dev/$CLAUDE_TTY" ]]; then
+    # Set iTerm2 tab color via proprietary escape codes
+    {
+      printf '\033]6;1;bg;red;brightness;%d\a'   "$TAB_R"
+      printf '\033]6;1;bg;green;brightness;%d\a' "$TAB_G"
+      printf '\033]6;1;bg;blue;brightness;%d\a'  "$TAB_B"
+    } > "/dev/$CLAUDE_TTY"
 
-  # Inject /color and /rename after Claude finishes responding (~4s delay)
-  osascript - "/dev/$CLAUDE_TTY" "$TAB_NAME" "$CHOSEN_COLOR" <<'ASEOF' &
+    # Inject /color and /rename after Claude finishes responding (~4s delay)
+    osascript - "/dev/$CLAUDE_TTY" "$TAB_NAME" "$CHOSEN_COLOR" <<'ASEOF' &
 on run argv
   set ttyDevice to item 1 of argv
   set tabName to item 2 of argv
@@ -119,8 +120,13 @@ on run argv
   end try
 end run
 ASEOF
+  else
+    echo "warn: no writable TTY for PID $CLAUDE_PID (tty=$CLAUDE_TTY)" >&2
+  fi
 else
-  echo "warn: no writable TTY for PID $CLAUDE_PID (tty=$CLAUDE_TTY)" >&2
+  # Non-iTerm2: color is tracked and /color + /rename are reported for manual use.
+  # The SKILL.md output line already surfaces the color and name to the user.
+  echo "note: not in iTerm2 — /color $CHOSEN_COLOR and /rename $TAB_NAME not auto-injected" >&2
 fi
 
 nohup bash "$(dirname "$0")/watcher.sh" "$CLAUDE_PID" "$SESSION_ID" > /dev/null 2>&1 &

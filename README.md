@@ -1,11 +1,11 @@
 # tab-setup
 
-A Claude Code skill that gives each iTerm2 tab a unique high-contrast color and renames it after its working directory — automatically, across all open sessions.
+A Claude Code skill that gives each terminal tab a unique high-contrast color and renames it after its working directory — automatically, across all open sessions.
 
 ## What it does
 
-- Sets the **iTerm2 tab color** via proprietary escape codes
 - Injects **`/color`** and **`/rename`** into the Claude Code session to update the prompt bar
+- Sets the **iTerm2 tab color** via escape codes (iTerm2 only)
 - Tracks open sessions in `~/.claude/tab-colors.json` and prunes dead ones automatically
 - Assigns colors from a pre-computed high-contrast sequence so adjacent tabs never look similar
 - A background watcher process removes each session from the tracking file when Claude exits
@@ -68,6 +68,7 @@ Add to `~/.claude/settings.json`:
 
 ## Requirements
 
-- macOS with iTerm2
+- macOS
 - Claude Code CLI
 - Python 3 (stdlib only — no pip dependencies)
+- iTerm2 (optional) — required for tab color escape codes and auto-injection of `/color`/`/rename`; without it, the assigned color and name are still reported so you can apply them manually

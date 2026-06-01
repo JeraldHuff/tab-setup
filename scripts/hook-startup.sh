@@ -136,21 +136,23 @@ with open(tracking_file, "w") as f:
     json.dump(live, f, indent=2)
 
 r, g, b = COLORS[chosen]
+in_iterm2 = os.environ.get("TERM_PROGRAM") == "iTerm.app"
 
-# Write iTerm2 tab color escape codes immediately
-try:
-    with open(tty_dev, "w") as tty_f:
-        tty_f.write(f"\033]6;1;bg;red;brightness;{r}\007")
-        tty_f.write(f"\033]6;1;bg;green;brightness;{g}\007")
-        tty_f.write(f"\033]6;1;bg;blue;brightness;{b}\007")
-        tty_f.flush()
-except Exception:
-    pass
+if in_iterm2:
+    # Write iTerm2 tab color escape codes immediately
+    try:
+        with open(tty_dev, "w") as tty_f:
+            tty_f.write(f"\033]6;1;bg;red;brightness;{r}\007")
+            tty_f.write(f"\033]6;1;bg;green;brightness;{g}\007")
+            tty_f.write(f"\033]6;1;bg;blue;brightness;{b}\007")
+            tty_f.flush()
+    except Exception:
+        pass
 
-# Background AppleScript: inject /color + /rename after Claude's first prompt
-ascript_path = os.path.expanduser("~/.claude/tab-setup-hook.applescript")
-with open(ascript_path, "w") as f:
-    f.write(f"""on run argv
+    # Background AppleScript: inject /color + /rename after Claude's first prompt
+    ascript_path = os.path.expanduser("~/.claude/tab-setup-hook.applescript")
+    with open(ascript_path, "w") as f:
+        f.write(f"""on run argv
   set ttyDevice to item 1 of argv
   set tabName to item 2 of argv
   set tabColor to item 3 of argv
@@ -173,12 +175,15 @@ with open(ascript_path, "w") as f:
   end try
 end run
 """)
-
-subprocess.Popen(
-    ["nohup", "osascript", ascript_path, tty_dev, name, chosen],
-    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    start_new_session=True,
-)
+    subprocess.Popen(
+        ["nohup", "osascript", ascript_path, tty_dev, name, chosen],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+else:
+    # Non-iTerm2: color tracking and watcher still run; banner must be set manually.
+    sys.stderr.write(f"tab-setup: not in iTerm2 — run /color {chosen} and /rename {name}\n")
+    sys.stderr.flush()
 
 # Launch watcher to clean up tracking file when the Claude process exits
 watcher_sh = os.path.join(scripts_dir, "watcher.sh")
