@@ -34,7 +34,12 @@
 # compaction. Read the hook payload from stdin and bail on anything but
 # startup/resume. (Missing/unparseable source falls through to normal behavior
 # so a payload-format change never silently disables the hook.)
-HOOK_INPUT="$(cat 2>/dev/null || true)"
+#
+# Only read stdin when it's piped — hook invocations always pipe the payload,
+# but a manual `bash hook-startup.sh` from a terminal would hang on `cat`
+# waiting for Ctrl-D.
+HOOK_INPUT=""
+[[ ! -t 0 ]] && HOOK_INPUT="$(cat 2>/dev/null || true)"
 if [[ -n "$HOOK_INPUT" ]]; then
   SOURCE="$(printf '%s' "$HOOK_INPUT" | python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("source",""))
