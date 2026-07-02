@@ -16,12 +16,35 @@
 # Optional: set ANTHROPIC_API_KEY in the env block of settings.json for
 # Haiku-generated session names (falls back to deterministic wordlist hash).
 #
+# Only acts on SessionStart source=startup|resume. On source=compact|clear it
+# exits early, since injecting /color + /rename into the live prompt mid-compact
+# interrupts the compaction.
+#
 # Note: CLAUDE_SESSION_ID is empty in SessionStart hooks (Claude Code limitation).
 # Session discovery walks the PPID chain to find the parent Claude process,
 # then matches its PID against session JSON files — no TTY access required.
 #
 # Tune the inject delay if /color fires before Claude's first prompt:
 #   TAB_SETUP_INJECT_DELAY=6 bash hook-startup.sh
+
+# SessionStart fires on several sources: startup, resume, clear, and compact.
+# Only startup/resume should trigger color+name injection. On compact (and
+# clear), Claude Code is mid-operation and the injected /color + /rename lines
+# are submitted into the live prompt via `write text` — which interrupts the
+# compaction. Read the hook payload from stdin and bail on anything but
+# startup/resume. (Missing/unparseable source falls through to normal behavior
+# so a payload-format change never silently disables the hook.)
+HOOK_INPUT="$(cat 2>/dev/null || true)"
+if [[ -n "$HOOK_INPUT" ]]; then
+  SOURCE="$(printf '%s' "$HOOK_INPUT" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("source",""))
+except Exception: pass' 2>/dev/null)"
+  case "$SOURCE" in
+    compact|clear)
+      exit 0
+      ;;
+  esac
+fi
 
 TRACKING_FILE="${HOME}/.claude/tab-colors.json"
 SESSIONS_DIR="${HOME}/.claude/sessions"
