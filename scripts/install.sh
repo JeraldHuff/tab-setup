@@ -15,7 +15,7 @@ echo "Installing tab-setup skill"
 echo "  from: $REPO_DIR"
 echo "  to:   $DEST"
 
-mkdir -p "$DEST/scripts" "$DEST/vscode-extension"
+mkdir -p "$DEST/scripts"
 
 # Skill files Claude reads at runtime.
 cp "$REPO_DIR/SKILL.md"            "$DEST/SKILL.md"
@@ -28,9 +28,13 @@ cp "$REPO_DIR/scripts/update.sh"       "$DEST/scripts/update.sh"
 
 # VS Code extension source — kept in the skill dir so the documented
 # vscode-extension/install.sh path stays valid after a script-based install.
-cp "$REPO_DIR/vscode-extension/extension.js"  "$DEST/vscode-extension/extension.js"
-cp "$REPO_DIR/vscode-extension/package.json"  "$DEST/vscode-extension/package.json"
-cp "$REPO_DIR/vscode-extension/install.sh"    "$DEST/vscode-extension/install.sh"
+# Copy the tree wholesale rather than naming files: an enumerated copy silently
+# omitted lib/ once extension.js started requiring it, which left the deployed
+# fallback path ("run vscode-extension/install.sh manually") installing an
+# extension that threw at activation. rm -rf first so files dropped upstream
+# don't linger as a stale deployed copy.
+rm -rf "$DEST/vscode-extension"
+cp -r "$REPO_DIR/vscode-extension" "$DEST/vscode-extension"
 
 chmod +x "$DEST/scripts/"*.sh "$DEST/vscode-extension/install.sh"
 
@@ -38,12 +42,17 @@ chmod +x "$DEST/scripts/"*.sh "$DEST/vscode-extension/install.sh"
 # Written to the skill root (not scripts/) so it doesn't break the verify diff.
 printf '%s\n' "$REPO_DIR" > "$DEST/.repo-path"
 
-# Verify the installed scripts match the repo so a silent stale copy can't linger.
-if diff -rq "$REPO_DIR/scripts" "$DEST/scripts" >/dev/null; then
-    echo "Done — installed scripts match the repo."
+# Verify the installed files match the repo so a silent stale copy can't linger.
+# vscode-extension/ is checked too: it's the tree whose enumerated copy used to
+# drop lib/, and that omission was invisible until the extension host logged a
+# failed activation.
+if diff -rq "$REPO_DIR/scripts" "$DEST/scripts" >/dev/null \
+   && diff -rq "$REPO_DIR/vscode-extension" "$DEST/vscode-extension" >/dev/null; then
+    echo "Done — installed scripts and extension match the repo."
 else
-    echo "Warning: installed scripts still differ from the repo after copy:" >&2
+    echo "Warning: installed files still differ from the repo after copy:" >&2
     diff -rq "$REPO_DIR/scripts" "$DEST/scripts" >&2 || true
+    diff -rq "$REPO_DIR/vscode-extension" "$DEST/vscode-extension" >&2 || true
     exit 1
 fi
 
