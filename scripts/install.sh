@@ -33,7 +33,8 @@ cp "$REPO_DIR/scripts/update.sh"       "$DEST/scripts/update.sh"
 # fallback path ("run vscode-extension/install.sh manually") installing an
 # extension that threw at activation. rm -rf first so files dropped upstream
 # don't linger as a stale deployed copy.
-rm -rf "$DEST/vscode-extension"
+# ${DEST:?} so an unset DEST can never make this "rm -rf /vscode-extension" (SC2115).
+rm -rf "${DEST:?}/vscode-extension"
 cp -r "$REPO_DIR/vscode-extension" "$DEST/vscode-extension"
 
 chmod +x "$DEST/scripts/"*.sh "$DEST/vscode-extension/install.sh"
