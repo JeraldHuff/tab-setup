@@ -162,3 +162,11 @@ Haiku-generated session names (otherwise it falls back to a deterministic wordli
 - Python 3 (stdlib only — no pip dependencies)
 - **iTerm2** (macOS) — for tab background color and auto-injection
 - **VS Code extension** (code-server / VS Code) — for auto-injection; see installation above
+
+## Running tests
+
+Tests use Node's built-in runner (`node:test`, Node 18+) — no dependencies to install:
+
+```bash
+node --test
+```
