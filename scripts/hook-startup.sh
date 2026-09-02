@@ -13,9 +13,6 @@
 #     }]
 #   }
 #
-# Optional: set ANTHROPIC_API_KEY in the env block of settings.json for
-# Haiku-generated session names (falls back to deterministic wordlist hash).
-#
 # Only acts on SessionStart source=startup|resume. On source=compact|clear it
 # exits early, since injecting /color + /rename into the live prompt mid-compact
 # interrupts the compaction.
@@ -24,16 +21,25 @@
 # Session discovery walks the PPID chain to find the parent Claude process,
 # then matches its PID against session JSON files — no TTY access required.
 #
-# Tune the inject delay if /color fires before Claude's first prompt:
-#   TAB_SETUP_INJECT_DELAY=6 bash hook-startup.sh
+# The tab name is set natively via the hook's sessionTitle output (no typing).
+# Only /color still needs injecting, and the injector waits for the session to
+# report ready rather than sleeping a fixed guess. Tunable:
+#   TAB_SETUP_INJECT_SETTLE=0.4 TAB_SETUP_INJECT_TIMEOUT=15 bash hook-startup.sh
 
-# SessionStart fires on several sources: startup, resume, clear, and compact.
-# Only startup/resume should trigger color+name injection. On compact (and
-# clear), Claude Code is mid-operation and the injected /color + /rename lines
-# are submitted into the live prompt via `write text` — which interrupts the
-# compaction. Read the hook payload from stdin and bail on anything but
-# startup/resume. (Missing/unparseable source falls through to normal behavior
-# so a payload-format change never silently disables the hook.)
+# SessionStart fires on five sources: startup, resume, clear, compact and fork.
+# Only startup/resume should trigger colour injection. The other three all fire
+# inside a session that is already running, where the injected /color is typed
+# into the live prompt via `write text` — interrupting a compaction, and (because
+# the injection clears the input line with Ctrl-E/Ctrl-U first) discarding
+# whatever the user had already typed. Read the hook payload from stdin and bail
+# on anything but startup/resume. (Missing/unparseable source falls through to
+# normal behavior so a payload-format change never silently disables the hook.)
+#
+# resume still runs, but not for the name: the name is carried across a resume by
+# the custom-title/agent-name entries this script appends to the transcript,
+# which Claude replays on load (verified by resuming with the hook disabled). It
+# runs so the iTerm2 tab background colour is re-emitted, since that is terminal
+# state the new tab does not inherit.
 #
 # Only read stdin when it's piped — hook invocations always pipe the payload,
 # but a manual `bash hook-startup.sh` from a terminal would hang on `cat`
@@ -45,7 +51,7 @@ if [[ -n "$HOOK_INPUT" ]]; then
 try: print(json.load(sys.stdin).get("source",""))
 except Exception: pass' 2>/dev/null)"
   case "$SOURCE" in
-    compact|clear)
+    compact|clear|fork)
       exit 0
       ;;
   esac
@@ -54,12 +60,17 @@ fi
 TRACKING_FILE="${HOME}/.claude/tab-colors.json"
 SESSIONS_DIR="${HOME}/.claude/sessions"
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INJECT_DELAY="${TAB_SETUP_INJECT_DELAY:-4}"
+# Injection timing. The old TAB_SETUP_INJECT_DELAY (a fixed pre-injection sleep)
+# is superseded: the injector now polls the session registry for readiness.
+# SETTLE  — pause after the session reports ready, before typing.
+# TIMEOUT — ceiling on the wait; inject anyway past this, as the old code did.
+INJECT_SETTLE="${TAB_SETUP_INJECT_SETTLE:-0.25}"
+INJECT_TIMEOUT="${TAB_SETUP_INJECT_TIMEOUT:-10}"
 
 [[ ! -f "$TRACKING_FILE" ]] && echo '{}' > "$TRACKING_FILE"
 
-python3 - "$TRACKING_FILE" "$SESSIONS_DIR" "$SCRIPTS_DIR" "$INJECT_DELAY" <<'PYEOF'
-import glob, hashlib, json, os, re, subprocess, sys, time
+python3 - "$TRACKING_FILE" "$SESSIONS_DIR" "$SCRIPTS_DIR" "$INJECT_SETTLE" "$INJECT_TIMEOUT" <<'PYEOF'
+import glob, json, os, re, subprocess, sys, time
 
 SEQUENCE = ["red", "blue", "green", "pink", "purple", "cyan", "yellow", "orange"]
 COLORS = {
@@ -73,30 +84,21 @@ COLORS = {
     "cyan":   (42,  161, 152),
 }
 
-ADJECTIVES = [
-    "amber", "arctic", "blazing", "cobalt", "dappled", "drifting", "ember",
-    "emerald", "feral", "gilded", "glacial", "glowing", "hollow", "indigo",
-    "jade", "liminal", "lunar", "mellow", "misty", "mossy", "nested", "oblique",
-    "onyx", "orbital", "pale", "phantom", "radiant", "rugged", "serene", "shaded",
-    "silent", "sinuous", "solar", "spectral", "spiral", "stellar", "tidal",
-    "translucent", "twilight", "verdant",
-]
-
-NOUNS = [
-    "anchor", "apex", "basin", "beacon", "canopy", "cascade", "circuit", "cliff",
-    "conduit", "crater", "delta", "drift", "ember", "fjord", "fractal", "glacier",
-    "glyph", "grove", "harbor", "horizon", "inlet", "lattice", "ledge", "lotus",
-    "mesa", "mirror", "nexus", "orbit", "outcrop", "peak", "prism", "pulse",
-    "ridge", "reef", "signal", "slate", "summit", "tide", "vale", "veil",
-]
-
-tracking_file, sessions_dir, scripts_dir, inject_delay = sys.argv[1:]
-inject_delay = int(inject_delay)
+tracking_file, sessions_dir, scripts_dir, inject_settle, inject_timeout = sys.argv[1:]
 
 
 def find_session_by_ppid(retries=10, delay=0.3):
-    """Walk PPID chain to find the Claude process, match to session JSON."""
-    ancestor_pids = set()
+    """Walk the PPID chain to find the Claude process, match to session JSON.
+
+    Ancestors are kept in order — nearest first — and the nearest one that owns a
+    live session wins. Scanning session files instead (in glob order) picks an
+    arbitrary match whenever more than one ancestor is a Claude session, which is
+    exactly the nested case: `claude` launched from inside a Claude session has
+    both the inner and outer process in its ancestry. The child's hook could then
+    resolve to the OUTER session and recolour/retitle it, and under iTerm2 aim the
+    /color injection at the outer session's TTY — typing into the wrong tab.
+    """
+    ancestor_pids = []  # ordered, nearest ancestor first
     pid = os.getpid()
     for _ in range(8):
         try:
@@ -107,59 +109,29 @@ def find_session_by_ppid(retries=10, delay=0.3):
             ppid = int(r.stdout.strip())
             if ppid <= 1:
                 break
-            ancestor_pids.add(ppid)
+            ancestor_pids.append(ppid)
             pid = ppid
         except Exception:
             break
 
     for _ in range(retries):
+        live = {}
         for f in glob.glob(os.path.join(sessions_dir, "*.json")):
             try:
                 data = json.load(open(f))
                 session_pid = data.get("pid")
-                if not session_pid:
+                if not session_pid or session_pid in live:
                     continue
                 os.kill(session_pid, 0)  # confirm alive
-                if session_pid in ancestor_pids:
-                    return session_pid, data.get("sessionId", ""), data.get("cwd", "")
+                live[session_pid] = (data.get("sessionId", ""), data.get("cwd", ""))
             except Exception:
                 continue
+        for candidate in ancestor_pids:  # nearest first — innermost session wins
+            if candidate in live:
+                session_id_, cwd_ = live[candidate]
+                return candidate, session_id_, cwd_
         time.sleep(delay)
     return None, None, None
-
-
-def generate_name_via_api(project_name, api_key):
-    """Call claude-haiku for a logical adjective-noun session name."""
-    payload = {
-        "model": "claude-haiku-4-5-20251001",
-        "max_tokens": 20,
-        "messages": [{"role": "user", "content":
-            f"Generate a memorable 2-word adjective-noun name for a coding session "
-            f"in project '{project_name}'. Reply ONLY with lowercase-hyphenated format "
-            f"e.g. 'fiscal-ledger'. No explanation."}],
-    }
-    try:
-        r = subprocess.run(
-            ["curl", "-s", "-f", "https://api.anthropic.com/v1/messages",
-             "-H", f"x-api-key: {api_key}",
-             "-H", "anthropic-version: 2023-06-01",
-             "-H", "content-type: application/json",
-             "-d", json.dumps(payload), "--max-time", "5"],
-            capture_output=True, text=True, timeout=8,
-        )
-        if r.returncode == 0:
-            text = json.loads(r.stdout)["content"][0]["text"].strip().lower()
-            if re.match(r"^[a-z]+-[a-z]+$", text):
-                return text
-    except Exception:
-        pass
-    return None
-
-
-def generate_name_via_wordlist(project_name):
-    """Deterministic adjective-noun from wordlists, keyed by project name."""
-    h = int(hashlib.md5(project_name.encode()).hexdigest(), 16)
-    return f"{ADJECTIVES[h % len(ADJECTIVES)]}-{NOUNS[(h >> 16) % len(NOUNS)]}"
 
 
 def env_reminder(project_dir):
@@ -224,31 +196,8 @@ try:
 except Exception:
     tty_dev = None
 
-# ---------------------------------------------------------------------------
-# Session naming — Haiku API → wordlist fallback
-# ---------------------------------------------------------------------------
-
-api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-session_name = generate_name_via_api(project_name, api_key) if api_key else None
-if not session_name:
-    session_name = generate_name_via_wordlist(project_name)
-
-# Official Claude Code hook output — sets the session title in the UI
-print(json.dumps({"sessionTitle": session_name}), flush=True)
-
-# Write session name into the session JSON if not already set.
-for f in glob.glob(os.path.join(sessions_dir, "*.json")):
-    try:
-        data = json.load(open(f))
-        if data.get("sessionId") != session_id:
-            continue
-        if not data.get("name"):
-            data["name"] = session_name
-            with open(f, "w") as wf:
-                json.dump(data, wf)
-        break
-    except Exception:
-        pass
+# The session title is emitted further down, once the tab name (including any
+# dedup suffix) has been computed — see "Session title" below.
 
 # ---------------------------------------------------------------------------
 # Tab color assignment
@@ -331,6 +280,42 @@ else:
 existing_names = {e.get("name", "") for e in live.values()}
 name = f"{project_name} ({chosen})" if project_name in existing_names else project_name
 
+# ---------------------------------------------------------------------------
+# Session title — native, no /rename injection
+# ---------------------------------------------------------------------------
+#
+# The hook already knows the name: it computed it just above from the cwd. So it
+# hands the name straight back to Claude on stdout instead of typing a /rename
+# into the TUI. This applies before the first paint, with no delay and no race.
+#
+# Must be nested under hookSpecificOutput. For SessionStart, Claude reads
+# `hookSpecificOutput.sessionTitle`; a top-level "sessionTitle" is not in the
+# base hook-output schema and is silently dropped by the parser.
+print(json.dumps({
+    "hookSpecificOutput": {
+        "hookEventName": "SessionStart",
+        "sessionTitle": name,
+    }
+}), flush=True)
+
+# Mirror the name into the session registry so `claude --resume` lists the tab
+# name rather than Claude's auto-derived one. Skipped when the user has renamed
+# the session themselves (nameSource == "user"), so a deliberate rename sticks.
+for f in glob.glob(os.path.join(sessions_dir, "*.json")):
+    try:
+        data = json.load(open(f))
+        if data.get("sessionId") != session_id:
+            continue
+        if data.get("nameSource") != "user" and data.get("name") != name:
+            data["name"] = name
+            with open(f, "w") as wf:
+                # Compact separators match how Claude writes this file; the
+                # default ", "/": " would reformat it on every launch.
+                json.dump(data, wf, separators=(",", ":"))
+        break
+    except Exception:
+        pass
+
 # Write to both stores; project-colors.json is the durable persistence layer
 live[session_id] = {"color": chosen, "pid": claude_pid, "cwd": cwd, "name": name}
 live["_last"] = chosen
@@ -368,13 +353,14 @@ if in_iterm2 and tty_dev:
     except Exception:
         pass
 
+    # AppleScript now types only /color — the tab name is set natively via the
+    # hook's sessionTitle output above, so /rename is no longer injected. That
+    # also drops the 0.3s pause that separated the two commands.
     ascript_path = os.path.expanduser("~/.claude/tab-setup-hook.applescript")
     with open(ascript_path, "w") as f:
-        f.write(f"""on run argv
+        f.write("""on run argv
   set ttyDevice to item 1 of argv
-  set tabName to item 2 of argv
-  set tabColor to item 3 of argv
-  delay {inject_delay}
+  set tabColor to item 2 of argv
   try
     tell application "iTerm2"
       repeat with w in windows
@@ -386,12 +372,9 @@ if in_iterm2 and tty_dev:
               -- moves to end-of-line and Ctrl-U kills to start, so the whole
               -- line is cleared regardless of cursor position. Without this,
               -- write text appends to the input buffer and the typed text merges
-              -- into "/color"/"/rename", corrupting both. (These are Claude
-              -- Code's own readline bindings, so they behave identically across
-              -- terminals.)
+              -- into "/color", corrupting it. (These are Claude Code's own
+              -- readline bindings, so they behave identically across terminals.)
               tell s to write text ((character id 5) & (character id 21) & "/color " & tabColor)
-              delay 0.3
-              tell s to write text ((character id 5) & (character id 21) & "/rename " & tabName)
               return
             end if
           end repeat
@@ -401,8 +384,37 @@ if in_iterm2 and tty_dev:
   end try
 end run
 """)
+
+    # Wait for readiness instead of sleeping a fixed guess.
+    #
+    # The old code slept 4s unconditionally, which cost ~4.8s to first colour and
+    # had a worse failure mode: it matched the iTerm2 session purely by TTY and
+    # never checked Claude was still there, so quitting inside the window typed
+    # "/color <name>" into whatever shell inherited the terminal. The poller
+    # below aborts instead, and fires as soon as the session is actually up
+    # (measured ~0.7s: the registry file gains a "status" field once it is).
+    session_json = os.path.join(sessions_dir, f"{claude_pid}.json")
+    poller = r"""
+sess="$1"; pid="$2"; ascript="$3"; ttydev="$4"; color="$5"; settle="$6"; timeout="$7"
+timeout="${timeout%%.*}"; timeout="${timeout:-10}"   # bash arithmetic is integer-only
+deadline=$(( $(date +%s) + timeout ))
+while :; do
+  kill -0 "$pid" 2>/dev/null || exit 0   # Claude exited  — never inject
+  [ -f "$sess" ] || exit 0               # session gone   — never inject
+  status=$(sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' "$sess" 2>/dev/null | head -1)
+  case "$status" in ""|busy) ;; *) break ;; esac
+  [ "$(date +%s)" -ge "$deadline" ] && break
+  sleep 0.1
+done
+sleep "$settle"
+kill -0 "$pid" 2>/dev/null || exit 0     # re-check: quit during the settle window
+[ -f "$sess" ] || exit 0
+exec osascript "$ascript" "$ttydev" "$color"
+"""
     subprocess.Popen(
-        ["nohup", "osascript", ascript_path, tty_dev, name, chosen],
+        ["bash", "-c", poller, "tab-setup-inject",
+         session_json, str(claude_pid), ascript_path, tty_dev, chosen,
+         inject_settle, inject_timeout],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True,
     )

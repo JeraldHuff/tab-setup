@@ -14,7 +14,7 @@ A Claude Code skill that gives each terminal tab a unique high-contrast color an
 
 | Environment | Banner color | Tab background | Auto-inject |
 |---|---|---|---|
-| iTerm2 (macOS) | ✅ `/color` via AppleScript | ✅ iTerm2 escape codes | ✅ ~4s delay |
+| iTerm2 (macOS) | ✅ `/color` via AppleScript | ✅ iTerm2 escape codes | ✅ polls until ready (~1s) |
 | VS Code / code-server | ✅ `/color` via extension | ✅ `workbench.action.terminal.changeColor` | ✅ polls until idle |
 | Other terminals | ✅ reported to user | ❌ | ❌ manual |
 
@@ -119,6 +119,19 @@ jq -e '.hooks.SessionStart[].hooks[].command' ~/.claude/settings.json
 echo '{}' | bash ~/.claude/skills/tab-setup/scripts/hook-startup.sh
 ```
 
+## Tests
+
+```bash
+node --test tests/session-status.test.js   # VS Code extension session lookup
+bash tests/nested-session.test.sh          # nested session must not hijack its parent
+```
+
+`nested-session.test.sh` builds a fake `$HOME` and a real parent/child process pair,
+each registering its own session file, then asserts the hook resolves to the *inner*
+one. It runs the scenario 20 times by default because the failure it guards against was
+order-dependent rather than consistent. Point it at a variant with
+`TAB_SETUP_HOOK=/path/to/hook-startup.sh`.
+
 The hook takes effect on the **next** session you start (not the current one). You can
 review or disable it anytime from the `/hooks` menu, or by deleting the `SessionStart`
 block. A broken `settings.json` silently disables *all* settings in that file, so keep
@@ -131,9 +144,20 @@ walking the PPID chain (hook → shell → claude) to identify the Claude proces
 dispatches to the correct injection mechanism based on the detected environment. No
 `/dev/tty` access required — works in code-server and JupyterHub too.
 
+### Naming
+
+The tab name is set natively through the hook's `sessionTitle` output, so no `/rename`
+is typed into the prompt and the name is in place before the first paint. It must be
+nested under `hookSpecificOutput` — for `SessionStart`, Claude reads
+`hookSpecificOutput.sessionTitle`, and a top-level `sessionTitle` is silently dropped.
+
 ### Tuning
 
-Tune the delay if `/color` fires before Claude's first prompt is ready (default `4`):
+Only `/color` is still injected, and the injector waits for the session to report ready
+(measured ~0.7s) instead of sleeping a fixed guess, then pauses `SETTLE` before typing.
+It aborts without typing anything if Claude exits first. `TAB_SETUP_INJECT_DELAY` is
+superseded; the knobs are `TAB_SETUP_INJECT_SETTLE` (default `0.25`) and
+`TAB_SETUP_INJECT_TIMEOUT` (integer seconds, default `10`):
 
 ```json
 {
@@ -144,7 +168,7 @@ Tune the delay if `/color` fires before Claude's first prompt is ready (default 
         "hooks": [
           {
             "type": "command",
-            "command": "TAB_SETUP_INJECT_DELAY=6 bash ~/.claude/skills/tab-setup/scripts/hook-startup.sh"
+            "command": "TAB_SETUP_INJECT_SETTLE=0.4 bash ~/.claude/skills/tab-setup/scripts/hook-startup.sh"
           }
         ]
       }
@@ -152,9 +176,6 @@ Tune the delay if `/color` fires before Claude's first prompt is ready (default 
   }
 }
 ```
-
-Optionally set `ANTHROPIC_API_KEY` in the `env` block of `settings.json` for
-Haiku-generated session names (otherwise it falls back to a deterministic wordlist).
 
 ## Requirements
 
