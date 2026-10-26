@@ -25,6 +25,7 @@ cp "$REPO_DIR/scripts/setup.sh"        "$DEST/scripts/setup.sh"
 cp "$REPO_DIR/scripts/sync-all.sh"     "$DEST/scripts/sync-all.sh"
 cp "$REPO_DIR/scripts/install.sh"      "$DEST/scripts/install.sh"
 cp "$REPO_DIR/scripts/update.sh"       "$DEST/scripts/update.sh"
+cp "$REPO_DIR/scripts/cc-status-wrap.sh" "$DEST/scripts/cc-status-wrap.sh"
 
 # VS Code extension source — kept in the skill dir so the documented
 # vscode-extension/install.sh path stays valid after a script-based install.

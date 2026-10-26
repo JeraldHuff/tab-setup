@@ -124,6 +124,7 @@ echo '{}' | bash ~/.claude/skills/tab-setup/scripts/hook-startup.sh
 ```bash
 node --test tests/session-status.test.js   # VS Code extension session lookup
 bash tests/nested-session.test.sh          # nested session must not hijack its parent
+bash tests/cc-status-wrap.test.sh          # iTerm2 Claude Code integration wrapper
 ```
 
 `nested-session.test.sh` builds a fake `$HOME` and a real parent/child process pair,
@@ -176,6 +177,43 @@ superseded; the knobs are `TAB_SETUP_INJECT_SETTLE` (default `0.25`) and
   }
 }
 ```
+
+## iTerm2's Claude Code integration
+
+iTerm2 3.7 ships its own Claude Code integration (**iTerm2 > Install Claude Code
+Integration**). It is useful — a status dot and an Idle / Working / Waiting subtitle on
+every tab — but two of its side effects fight this skill:
+
+- Its *Enter Workgroup* trigger fires whenever a `claude` job starts and renames the
+  iTerm2 session to the workgroup's main-session name, **"Chat"**. iTerm2 shows the
+  session name on the tab, so the title tab-setup chose disappears behind "Chat".
+- Its `cc-status` hook hard-codes the subtitle colours (idle is `#888888` grey), which is
+  unreadable on the saturated tab backgrounds tab-setup assigns.
+
+`scripts/cc-status-wrap.sh` fixes both while keeping the integration. Point every hook
+the integration installed at it instead of `cc-status` (it is installed on
+`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`,
+`PermissionRequest`, `Stop`, `StopFailure`, `SubagentStop` and `SessionEnd`):
+
+```json
+{
+  "type": "command",
+  "command": "~/.claude/skills/tab-setup/scripts/cc-status-wrap.sh ~/.config/iterm2/cc-status"
+}
+```
+
+The wrapper runs `cc-status` itself (hooks on one event run in parallel, so a separate
+hook entry would race it), then in a detached background step — no added hook latency —
+sets the session name to `\(session.terminalWindowName)` so the tab follows whatever
+title Claude Code sends, and recolours the status text white. The argument is optional:
+without it the wrapper looks for `~/.config/iterm2/cc-status` and then iTerm2's bundle,
+and **does nothing when the integration is not installed**, so the hook entries are safe
+to leave in place if you later uninstall it. Outside iTerm2 it only runs `cc-status`.
+
+Knobs (environment variables on the hook command): `TAB_SETUP_STATUS_TEXT_COLOR`
+(`#rrggbb`, or `keep` for cc-status's per-state colours), `TAB_SETUP_NAME_FORMAT` (an
+iTerm2 session-name expression, or `keep` to leave names alone), `TAB_SETUP_CC_STATUS`,
+`TAB_SETUP_IT2`, `TAB_SETUP_REAPPLY_DELAYS`. Tests: `bash tests/cc-status-wrap.test.sh`.
 
 ## Requirements
 
