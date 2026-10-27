@@ -152,6 +152,14 @@ is typed into the prompt and the name is in place before the first paint. It mus
 nested under `hookSpecificOutput` — for `SessionStart`, Claude reads
 `hookSpecificOutput.sessionTitle`, and a top-level `sessionTitle` is silently dropped.
 
+A name you give a session yourself (`/rename`, or the rename in the `claude --resume`
+picker) survives a resume. Claude stores it in
+`~/.claude/projects/<project>/<session-id>/custom-title.json` and the hook reads it back:
+if the stored title isn't one the hook would have derived (`<folder>` or
+`<folder> (<colour>)`), it is re-emitted as the `sessionTitle` and the registry and
+transcript are left alone. A hook-derived title is recomputed on resume so the `(colour)`
+dedup suffix follows the sessions that are live now.
+
 ### Tuning
 
 Only `/color` is still injected, and the injector waits for the session to report ready

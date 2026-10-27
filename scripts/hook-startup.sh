@@ -35,11 +35,12 @@
 # on anything but startup/resume. (Missing/unparseable source falls through to
 # normal behavior so a payload-format change never silently disables the hook.)
 #
-# resume still runs, but not for the name: the name is carried across a resume by
-# the custom-title/agent-name entries this script appends to the transcript,
-# which Claude replays on load (verified by resuming with the hook disabled). It
-# runs so the iTerm2 tab background colour is re-emitted, since that is terminal
-# state the new tab does not inherit.
+# resume still runs, mainly for the colour: the iTerm2 tab background is terminal
+# state the new tab does not inherit. For the name, a resumed session that the
+# user renamed (/rename, or the picker's rename) keeps that name — see "Resume:
+# keep a name the user gave the session" below. Only a session whose title is
+# one this hook derived gets its name recomputed (so the "(colour)" dedup suffix
+# stays current).
 #
 # Only read stdin when it's piped — hook invocations always pipe the payload,
 # but a manual `bash hook-startup.sh` from a terminal would hang on `cat`
@@ -278,7 +279,88 @@ else:
 # The suffix is only added when another live session already holds the plain
 # project name; once that conflict clears, the label drops on the next boot.
 existing_names = {e.get("name", "") for e in live.values()}
-name = f"{project_name} ({chosen})" if project_name in existing_names else project_name
+derived_name = f"{project_name} ({chosen})" if project_name in existing_names else project_name
+
+# ---------------------------------------------------------------------------
+# Resume: keep a name the user gave the session
+# ---------------------------------------------------------------------------
+#
+# Claude stores a /rename in ~/.claude/projects/<project>/<session-id>/custom-title.json
+# (2.1+) and as `custom-title` entries in the transcript, and replays it on
+# resume. This hook used to emit the cwd-derived sessionTitle on every resume as
+# well, and the hook's title won: resuming a session named
+# "Holokai – staging go-live" silently retitled it "app.holokai-intel.com", and
+# Claude then persisted that as the new custom title. So: if the session already
+# carries a title this hook did not produce, keep it. It is still emitted as the
+# sessionTitle (so the tab is right before the replay lands), but the registry
+# name and the transcript's title entries are left alone. A stored title that IS
+# hook-shaped ("<folder>" or "<folder> (<colour>)") is recomputed as before, so
+# the dedup suffix tracks the sessions that are live now, not at first launch.
+
+
+def hook_shaped(title):
+    """True if `title` is one this hook would derive for this cwd."""
+    return title == project_name or any(title == f"{project_name} ({c})" for c in SEQUENCE)
+
+
+def last_custom_title(path):
+    """The customTitle of the last `custom-title` entry in a transcript, or None.
+
+    Reads the tail first — transcripts run to tens of MB and the title entries
+    cluster at the end — and only falls back to the whole file if the tail has
+    none. A line cut in half by the tail boundary fails to parse and is skipped.
+    """
+    marker = b'"custom-title"'
+    size = os.path.getsize(path)
+    with open(path, "rb") as fh:
+        for span in (1 << 20, size):
+            fh.seek(max(size - span, 0))
+            chunk = fh.read()
+            if marker in chunk:
+                for line in reversed(chunk.splitlines()):
+                    if marker not in line:
+                        continue
+                    try:
+                        d = json.loads(line)
+                    except Exception:
+                        continue
+                    if d.get("type") == "custom-title" and d.get("customTitle"):
+                        return d["customTitle"]
+            if span >= size:
+                return None
+    return None
+
+
+def existing_title(sid):
+    """The title Claude has stored for session `sid`, or None.
+
+    Globbed by session id rather than by project hash: Claude maps every
+    non-alphanumeric character of the cwd to "-" (jerald.ai -> jerald-ai), and
+    a session id is unique across projects anyway.
+    """
+    if not sid:
+        return None
+    projects = os.path.expanduser("~/.claude/projects")
+    for f in glob.glob(os.path.join(projects, "*", sid, "custom-title.json")):
+        try:
+            t = json.load(open(f)).get("customTitle")
+            if t:
+                return t
+        except Exception:
+            pass
+    for f in glob.glob(os.path.join(projects, "*", f"{sid}.jsonl")):
+        try:
+            t = last_custom_title(f)
+            if t:
+                return t
+        except Exception:
+            pass
+    return None
+
+
+kept_title = existing_title(session_id)
+preserved = bool(kept_title) and not hook_shaped(kept_title)
+name = kept_title if preserved else derived_name
 
 # ---------------------------------------------------------------------------
 # Session title — native, no /rename injection
@@ -300,12 +382,15 @@ print(json.dumps({
 
 # Mirror the name into the session registry so `claude --resume` lists the tab
 # name rather than Claude's auto-derived one. Skipped when the user has renamed
-# the session themselves (nameSource == "user"), so a deliberate rename sticks.
+# the session themselves (nameSource == "user", or a preserved title above), so
+# a deliberate rename sticks.
 for f in glob.glob(os.path.join(sessions_dir, "*.json")):
     try:
         data = json.load(open(f))
         if data.get("sessionId") != session_id:
             continue
+        if preserved:
+            break
         if data.get("nameSource") != "user" and data.get("name") != name:
             data["name"] = name
             with open(f, "w") as wf:
@@ -322,18 +407,20 @@ live["_last"] = chosen
 with open(tracking_file, "w") as f:
     json.dump(live, f, indent=2)
 
-project_colors[cwd] = {"color": chosen, "name": name, "pid": claude_pid}
+project_colors[cwd] = {"color": chosen, "name": derived_name, "pid": claude_pid}
 with open(project_colors_file, "w") as f:
     json.dump(project_colors, f, indent=2)
 
-# Transcript writes — universal, guarded by file existence
-project_hash = cwd.replace("/", "-")
-transcript = os.path.expanduser(f"~/.claude/projects/{project_hash}/{session_id}.jsonl")
-if os.path.exists(transcript):
+# Transcript writes — universal, guarded by file existence. Found by session id:
+# Claude's project-dir name maps every non-alphanumeric cwd character to "-", so
+# a hand-rolled cwd.replace("/", "-") missed every dotted folder (jerald.ai).
+# A preserved title is already in the transcript; only the colour is appended.
+for transcript in glob.glob(os.path.expanduser(f"~/.claude/projects/*/{session_id}.jsonl")):
     with open(transcript, "a") as f:
         f.write(json.dumps({"type": "agent-color",  "agentColor":  chosen, "sessionId": session_id}) + "\n")
-        f.write(json.dumps({"type": "custom-title", "customTitle": name,   "sessionId": session_id}) + "\n")
-        f.write(json.dumps({"type": "agent-name",   "agentName":   name,   "sessionId": session_id}) + "\n")
+        if not preserved:
+            f.write(json.dumps({"type": "custom-title", "customTitle": name,   "sessionId": session_id}) + "\n")
+            f.write(json.dumps({"type": "agent-name",   "agentName":   name,   "sessionId": session_id}) + "\n")
 
 # ---------------------------------------------------------------------------
 # Terminal color injection
